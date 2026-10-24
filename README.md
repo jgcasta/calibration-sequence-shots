@@ -1,6 +1,6 @@
 # ZWO Calibration Library GUI
 
-**Version 1.0.0 — English Edition**
+**Version 1.0.0**
 
 A desktop Python application for acquiring calibration frames with ZWO ASI astronomy cameras on Linux. It captures **DARK**, **DARKFLAT**, and **FLAT** images in RAW16 FITS format, organizes files by object, and controls a compatible INDI light panel (tested in design against the Optec Flip-Flat driver interface).
 
