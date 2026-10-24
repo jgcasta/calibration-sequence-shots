@@ -18,6 +18,8 @@ This English edition is based on the former Spanish version 2.2.3, with applicat
 - Light control and brightness setting from **0–255**, subject to the INDI driver's actual limits.
 - Session progress, log, user confirmations, CSV inventory, and lossless FITS metadata.
 
+![screenshot](image.png)
+
 ## Requirements
 
 - Ubuntu or another Linux distribution with Python 3, Tkinter and a working USB interface.
