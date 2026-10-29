@@ -1,3 +1,4 @@
 zwoasi
 numpy
 astropy
+matplotlib>=3.8

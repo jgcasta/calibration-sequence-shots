@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""ZWO Calibration Library GUI v1.0.0. Uncalibrated RAW16 captures."""
+"""ZWO Calibration Library GUI v1.2.1. Uncalibrated RAW16 captures."""
 from __future__ import annotations
 import csv
 import os
 import queue
 import re
 import threading
+import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 import numpy as np
 from astropy.io import fits
@@ -27,9 +31,12 @@ def file_token(value: object) -> str:
 class DarkFlatApp(BaseApp):
     def _build(self):
         super()._build()
-        self.root.title('ZWO Calibration Library · 1.0.0')
-        self.root.geometry('1030x850')
+        self.root.title('ZWO Calibration Library · 1.2.1')
+        self.root.geometry('1200x850')
+        self.root.minsize(890, 620)
         self.sdk_config = Path.home() / '.config' / 'zwo-dark-library' / 'settings.json'
+        self.cooler_status = tk.StringVar(value='Cooling control: connect a camera')
+        self.cooler_supported = False
         self.object_name = tk.StringVar(value='CALIBRATION')
         self.flat_exp = tk.StringVar(value='0.1')
         self.flat_count = tk.StringVar(value='30')
@@ -59,6 +66,39 @@ class DarkFlatApp(BaseApp):
         self.filter_entry.grid(row=0, column=3, sticky='ew', pady=4)
         general.columnconfigure(1, weight=1)
         general.columnconfigure(3, weight=1)
+
+        cooling = ttk.LabelFrame(parent, text='Camera temperature control', padding=8)
+        cooling.pack(fill='x', before=self.start_button.master, pady=(0, 8))
+        ttk.Label(cooling, textvariable=self.cooler_status).pack(side='left', padx=(0, 15))
+        self.cooler_apply_button = ttk.Button(cooling, text='Set temperature / enable cooler',
+                                              command=self.apply_camera_temperature, state='disabled')
+        self.cooler_apply_button.pack(side='left', padx=5)
+        self.cooler_refresh_button = ttk.Button(cooling, text='Read temperature',
+                                                command=self.read_camera_temperature, state='disabled')
+        self.cooler_refresh_button.pack(side='left', padx=5)
+        # Acquisition-safe sampling: worker never manipulates Tk objects.
+        self.temperature_samples = deque(maxlen=18000)
+        self._temp_epoch = time.monotonic()
+        self._temp_sample_busy = False
+        self._temp_camera_id = None
+        graph_section = ttk.LabelFrame(parent, text='Sensor temperature history', padding=8)
+        graph_section.pack(fill='both', expand=False, before=self.start_button.master, pady=(0, 8))
+        self.temperature_figure = Figure(figsize=(9.4, 2.05), dpi=100)
+        self.temperature_axes = self.temperature_figure.add_subplot(111)
+        self.temperature_axes.set_xlabel('Elapsed time (min)')
+        self.temperature_axes.set_ylabel('Temperature (°C)')
+        self.temperature_axes.grid(True, alpha=0.22)
+        self.temperature_line, = self.temperature_axes.plot([], [], lw=1.5, label='Sensor')
+        self.temperature_target_line = self.temperature_axes.axhline(0, linestyle='--', lw=1, label='Target', visible=False)
+        self.temperature_axes.legend(loc='upper right', fontsize=8)
+        self.temperature_canvas = FigureCanvasTkAgg(self.temperature_figure, master=graph_section)
+        self.temperature_canvas.get_tk_widget().pack(fill='both', expand=True)
+        graph_actions = ttk.Frame(graph_section)
+        graph_actions.pack(fill='x', pady=(3, 0))
+        ttk.Button(graph_actions, text='Clear graph', command=self._clear_temperature_graph).pack(side='left', padx=(0, 7))
+        ttk.Button(graph_actions, text='Export temperature CSV', command=self._export_temperature_csv).pack(side='left')
+        ttk.Label(graph_actions, text='Readings every 2 s, when camera access is available').pack(side='right')
+        self.root.after(2000, self._refresh_cooling_status)
 
         extra = ttk.LabelFrame(parent, text='DARK-FLAT / FLAT acquisition', padding=8)
         extra.pack(fill='x', before=self.start_button.master, pady=(0, 8))
@@ -108,6 +148,10 @@ class DarkFlatApp(BaseApp):
         self.indi_off_button = ttk.Button(indi_frame, text='Turn off', command=self.panel_off, state='disabled')
         self.indi_off_button.grid(row=2, column=4, sticky='w', pady=(8,0))
         ttk.Label(indi_frame, textvariable=self.indi_status).grid(row=2, column=5, columnspan=3, sticky='w')
+        # Put temperature history below acquisition and INDI settings; settings
+        # always come first and the vertical scrollbar exposes the whole form.
+        graph_section.pack_forget()
+        graph_section.pack(fill='x', before=self.start_button.master, pady=(0, 8))
         self.start_button.configure(text='Start DARKS + DARK-FLATS + FLATS')
         self.sdk_button = ttk.Button(self.detect_button.master, text='Select SDK…', command=self.choose_sdk)
         self.sdk_button.pack(side='left', padx=(6,0))
@@ -285,9 +329,141 @@ class DarkFlatApp(BaseApp):
                 return
         super().detect()
 
+    def connect(self):
+        super().connect()
+        supported = (self.camera is not None
+                     and bool(self.caminfo.get('IsCoolerCam'))
+                     and all(k in self.controls for k in ('TargetTemp', 'CoolerOn', 'Temperature'))
+                     and not bool(self.controls['TargetTemp'].get('IsReadOnly', False)))
+        self.cooler_supported = supported
+        self.entries[0].configure(state='normal' if supported else 'disabled')
+        self.cooler_apply_button.configure(state='normal' if supported else 'disabled')
+        self.cooler_refresh_button.configure(state='normal' if self.camera and 'Temperature' in self.controls else 'disabled')
+        if supported:
+            try:
+                with self.lock:
+                    value = self.camera.get_control_value(asi.ASI_TARGET_TEMP)[0]
+                self.target_temp.set(str(value))
+            except Exception:
+                pass
+        self._clear_temperature_graph()
+        self.read_camera_temperature()
+
+    def read_camera_temperature(self):
+        if self.camera is None:
+            self.cooler_status.set('Cooling control: no camera connected')
+            return
+        with self.lock:
+            measured = self._get_temperature()
+            cooler_on = None
+            if self.cooler_supported:
+                try:
+                    cooler_on = bool(self.camera.get_control_value(asi.ASI_COOLER_ON)[0])
+                except Exception:
+                    pass
+        actual = f'{measured:.1f} °C' if measured is not None else 'unavailable'
+        if self.cooler_supported:
+            status = 'ON' if cooler_on else 'OFF' if cooler_on is False else 'unknown'
+            self.cooler_status.set(f'Sensor: {actual}  |  Cooler: {status}  |  Target: {self.target_temp.get()} °C')
+        else:
+            self.cooler_status.set(f'Sensor: {actual}  |  Temperature setting unavailable')
+
+    def apply_camera_temperature(self):
+        if self.running or not self.cooler_supported or self.camera is None:
+            return
+        try:
+            value = float(self.target_temp.get().replace(',', '.'))
+            spec = self.controls['TargetTemp']
+            if not np.isfinite(value) or not spec['MinValue'] <= round(value) <= spec['MaxValue']:
+                raise ValueError(f'Target must be between {spec["MinValue"]} and {spec["MaxValue"]} °C')
+            target = round(value)
+            with self.lock:
+                self.camera.set_control_value(asi.ASI_TARGET_TEMP, target, auto=False)
+                self.camera.set_control_value(asi.ASI_COOLER_ON, 1, auto=False)
+            self.target_temp.set(str(target))
+            self._log(f'Camera cooling enabled; target {target} °C')
+            self.read_camera_temperature()
+        except Exception as exc:
+            messagebox.showerror('Camera temperature', str(exc))
+
+    def _clear_temperature_graph(self):
+        self.temperature_samples.clear()
+        self._temp_epoch = time.monotonic()
+        self._draw_temperature_graph()
+
+    def _export_temperature_csv(self):
+        if not self.temperature_samples:
+            messagebox.showinfo('Temperature history', 'No temperature readings available yet.')
+            return
+        path = filedialog.asksaveasfilename(defaultextension='.csv',
+                 filetypes=[('CSV files', '*.csv')], initialfile='temperature_history.csv')
+        if not path:
+            return
+        with open(path, 'w', encoding='utf-8', newline='') as fp:
+            writer = csv.writer(fp)
+            writer.writerow(['utc_timestamp', 'elapsed_seconds', 'sensor_temperature_c', 'target_temperature_c'])
+            writer.writerows(self.temperature_samples)
+        self._log(f'Temperature history exported to {path}')
+
+    def _draw_temperature_graph(self):
+        rows = list(self.temperature_samples)
+        if rows:
+            xs = [r[1] / 60 for r in rows]
+            ys = [r[2] for r in rows]
+            self.temperature_line.set_data(xs, ys)
+            right = max(5, xs[-1] + 0.5)
+            self.temperature_axes.set_xlim(max(0, right - 90), right)
+            target = None
+            if self.cooler_supported:
+                try:
+                    target = float(self.target_temp.get().replace(',', '.'))
+                except (ValueError, AttributeError):
+                    pass
+            self.temperature_target_line.set_visible(target is not None)
+            if target is not None:
+                self.temperature_target_line.set_ydata([target, target])
+                ys.append(target)
+            low, high = min(ys), max(ys)
+            margin = max(1.0, (high - low) * 0.15)
+            self.temperature_axes.set_ylim(low - margin, high + margin)
+        else:
+            self.temperature_line.set_data([], [])
+            self.temperature_target_line.set_visible(False)
+            self.temperature_axes.set_xlim(0, 5)
+            self.temperature_axes.set_ylim(-20, 30)
+        self.temperature_canvas.draw_idle()
+
+    def _refresh_cooling_status(self):
+        # Do not compete with camera acquisition: a busy lock means skip this sample.
+        if self.camera is not None and not self._temp_sample_busy:
+            self._temp_sample_busy = True
+            camera = self.camera
+            def sample():
+                result = None
+                try:
+                    if self.lock.acquire(blocking=False):
+                        try:
+                            if camera is self.camera:
+                                measured = self._get_temperature()
+                                cooler_on = None
+                                if self.cooler_supported:
+                                    try:
+                                        cooler_on = bool(camera.get_control_value(asi.ASI_COOLER_ON)[0])
+                                    except Exception:
+                                        pass
+                                result = (datetime.now(timezone.utc).isoformat(),
+                                          time.monotonic() - self._temp_epoch, measured, cooler_on, camera)
+                        finally:
+                            self.lock.release()
+                except Exception:
+                    pass
+                self.messages.put(('temperature_sample', result))
+            threading.Thread(target=sample, daemon=True).start()
+        self.root.after(2000, self._refresh_cooling_status)
+
     def _single_row(self):
         """Read a single acquisition configuration from the visible fields."""
-        cooled = bool(self.caminfo.get('IsCoolerCam'))
+        cooled = self.cooler_supported
         temp = float(self.target_temp.get().replace(',', '.')) if cooled else None
         gain = int(self.gain.get())
         offset_text = self.offset.get().strip()
@@ -314,9 +490,11 @@ class DarkFlatApp(BaseApp):
         out = Path(out_str).expanduser() / object_dir
         out.mkdir(parents=True, exist_ok=True)
         if not out.is_dir() or not os.access(out, os.W_OK): raise ValueError('Output directory is not writable')
-        cooled = bool(self.caminfo.get('IsCoolerCam'))
+        cooled = self.cooler_supported
+        if bool(self.caminfo.get('IsCoolerCam')) and not cooled:
+            raise ValueError('Camera reports cooling but does not expose writable temperature/cooler controls')
         for key in ('Exposure', 'Gain'):
-            if key not in self.controls: raise ValueError(f'No existe control {key}')
+            if key not in self.controls: raise ValueError(f'Missing camera control: {key}')
         if cooled and not all(k in self.controls for k in ('TargetTemp','CoolerOn','Temperature')):
             raise ValueError('Cooled camera does not report all required temperature controls')
         flats = self.use_flats.get()
@@ -378,7 +556,7 @@ class DarkFlatApp(BaseApp):
         self.detect_button.configure(state='disabled')
         self.connect_button.configure(state='disabled')
         for widget in self.entries + self.extra_entries + [self.dir_entry, self.dir_button,
-                    self.sdk_button, self.flat_check, self.indi_connect_button,
+                    self.sdk_button, self.flat_check, self.cooler_apply_button, self.cooler_refresh_button, self.indi_connect_button,
                     self.indi_test_button, self.indi_off_button,
                     self.driver_entry, self.indi_start_server_button, self.indi_stop_server_button]:
             widget.configure(state='disabled')
@@ -525,6 +703,19 @@ class DarkFlatApp(BaseApp):
                     prompt, event, result = data
                     result['approved'] = messagebox.askokcancel('User action required', prompt)
                     event.set()
+                elif kind == 'temperature_sample':
+                    self._temp_sample_busy = False
+                    if data is not None:
+                        utc, elapsed, measured, cooler_on, camera = data
+                        if camera is self.camera and measured is not None:
+                            try:
+                                set_point = float(self.target_temp.get()) if self.cooler_supported else ''
+                            except ValueError:
+                                set_point = ''
+                            self.temperature_samples.append((utc, round(elapsed, 3), measured, set_point))
+                            status = ('ON' if cooler_on else 'OFF') if cooler_on is not None else 'unknown'
+                            self.cooler_status.set(f'Sensor: {measured:.1f} °C  |  Cooler: {status}  |  Target: {set_point} °C' if self.cooler_supported else f'Sensor: {measured:.1f} °C  |  Temperature setting unavailable')
+                            self._draw_temperature_graph()
                 elif kind == 'log': self._log(data)
                 elif kind == 'status': self.status.set(data)
                 elif kind == 'progress':
@@ -542,8 +733,11 @@ class DarkFlatApp(BaseApp):
                     self.detect_button.configure(state='normal')
                     self.connect_button.configure(state='normal')
                     for widget in self.entries + self.extra_entries + [self.dir_entry, self.dir_button,
-                                  self.sdk_button, self.flat_check, self.indi_connect_button, self.driver_entry]:
+                                  self.sdk_button, self.flat_check, self.cooler_apply_button, self.cooler_refresh_button, self.indi_connect_button, self.driver_entry]:
                         widget.configure(state='normal')
+                    self.entries[0].configure(state='normal' if self.cooler_supported else 'disabled')
+                    self.cooler_apply_button.configure(state='normal' if self.cooler_supported else 'disabled')
+                    self.cooler_refresh_button.configure(state='normal' if self.camera and 'Temperature' in self.controls else 'disabled')
                     self.indi_start_server_button.configure(state='disabled' if self.indi_server.owned_running() else 'normal')
                     self.indi_stop_server_button.configure(state='normal' if self.indi_server.owned_running() else 'disabled')
                     state = 'normal' if self.panel.client is not None else 'disabled'

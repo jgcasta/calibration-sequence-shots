@@ -33,7 +33,7 @@ def numeric_token(value):
 class DarkLibraryApp:
     def __init__(self, root):
         self.root = root
-        root.title("ZWO Calibration Library · 1.0.0")
+        root.title("ZWO Calibration Library · 1.1.0")
         root.geometry("900x725")
         self.camera = None
         self.caminfo = {}
@@ -61,8 +61,30 @@ class DarkLibraryApp:
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build(self):
-        outer = ttk.Frame(self.root, padding=12)
-        outer.pack(fill="both", expand=True)
+        # Use a vertically scrollable settings area so lower capture controls
+        # remain reachable on screens with different sizes or DPI scaling.
+        viewport = ttk.Frame(self.root)
+        viewport.pack(fill="both", expand=True)
+        canvas = tk.Canvas(viewport, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        outer = ttk.Frame(canvas, padding=12)
+        canvas_item = canvas.create_window((0, 0), window=outer, anchor="nw")
+        outer.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(canvas_item, width=event.width))
+        def scroll_wheel(event):
+            if event.num == 4:
+                canvas.yview_scroll(-3, "units")
+            elif event.num == 5:
+                canvas.yview_scroll(3, "units")
+            elif getattr(event, "delta", 0):
+                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        canvas.bind_all("<MouseWheel>", scroll_wheel, add="+")
+        canvas.bind_all("<Button-4>", scroll_wheel, add="+")
+        canvas.bind_all("<Button-5>", scroll_wheel, add="+")
+        self.settings_canvas = canvas
         sdk = ttk.LabelFrame(outer, text="SDK ZWO ASI", padding=10)
         sdk.pack(fill="x", pady=(0, 8))
         ttk.Entry(sdk, textvariable=self.sdk_path).pack(side="left", fill="x", expand=True, padx=(0, 8))

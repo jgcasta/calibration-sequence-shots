@@ -1,6 +1,8 @@
+> **v1.2.1 GUI layout fix:** The entire window now scrolls vertically, including the complete DARK capture settings (exposure and number of DARKS) and DARK-FLAT / FLAT settings (exposure and number of FLATS). The temperature history chart appears below acquisition and INDI controls, so it no longer hides capture inputs on smaller displays. Scroll using the mouse wheel or the right-side scrollbar.
+
 # ZWO Calibration Library GUI
 
-**Version 1.0.0**
+**Version 1.2.0 — English Edition**
 
 A desktop Python application for acquiring calibration frames with ZWO ASI astronomy cameras on Linux. It captures **DARK**, **DARKFLAT**, and **FLAT** images in RAW16 FITS format, organizes files by object, and controls a compatible INDI light panel (tested in design against the Optec Flip-Flat driver interface).
 
@@ -18,7 +20,16 @@ This English edition is based on the former Spanish version 2.2.3, with applicat
 - Light control and brightness setting from **0–255**, subject to the INDI driver's actual limits.
 - Session progress, log, user confirmations, CSV inventory, and lossless FITS metadata.
 
-![screenshot](image.png)
+
+## Camera temperature control (new in v1.2.1)
+
+After connecting a ZWO camera, the application checks the SDK camera property `IsCoolerCam` and the `TargetTemp`, `CoolerOn`, and `Temperature` controls. It also checks that the target-temperature control is writable.
+
+- **Supported cooled camera:** the **Target temperature (°C)** field and **Set temperature / enable cooler** button are enabled. Enter a target within the SDK-reported camera limits, then select the button to apply `ASI_TARGET_TEMP` and enable `ASI_COOLER_ON`. The status displays actual sensor temperature, cooler status and requested target; **Read temperature** refreshes the reading, and it also refreshes automatically every two seconds while idle.
+- **Uncooled camera or camera lacking these controls:** the target-temperature field and cooler button remain disabled. If the camera exposes a temperature sensor, its measured value can still be displayed and recorded.
+- **Before acquisition:** cooled cameras automatically receive the target temperature and cooler-on command; capture waits for an actual sensor temperature within ±1 °C of the target for 30 continuous seconds (maximum 15 minutes). If it cannot stabilize, acquisition fails rather than silently proceeding.
+
+A target cannot be guaranteed for all ambient temperatures. Allow adequate ventilation around the camera. This release does not automatically turn off the cooler after acquisition, so that back-to-back calibration sessions can preserve the target; disconnect or warm the camera using your normal shutdown procedure.
 
 ## Requirements
 
@@ -61,8 +72,6 @@ If Linux cannot access the camera or the panel, check USB permissions and udev r
 | DARK-FLAT / FLAT acquisition | FLAT exposure, **Number of FLATS**, capture option | DARK-FLAT count automatically equals FLAT count |
 | FLAT panel · INDI server | Host, TCP port, optional device, driver, serial port, brightness | The serial-port detector scans the **local** computer only |
 | Actions | Start acquisition, stop after current frame | FITS files are saved incrementally |
-
-![alt text](image-1.png)
 
 ### Configure the camera
 
@@ -186,3 +195,10 @@ LICENSE                CC BY 4.0 license notice and official legal-text link
 Licensed under **Creative Commons Attribution 4.0 International (CC BY 4.0)**. See [`LICENSE`](LICENSE) and the [official license text](https://creativecommons.org/licenses/by/4.0/legalcode.en). You may share and adapt the work, including commercially, provided you give appropriate attribution, provide a link to the license, and indicate if changes were made. No warranties are provided.
 
 For software, CC BY 4.0 is not the usual recommended code license, but this project uses it as requested. Note that ZWO and INDI and their dependencies retain their own respective licenses; this CC BY 4.0 notice covers only the original project materials.
+
+
+## Sensor temperature history (v1.2.1)
+
+The main window now contains a live plot of sensor temperature against elapsed time (minutes). Readings are requested every two seconds when the camera is available; the program skips busy camera accesses to avoid disturbing an ongoing exposure. For cooled cameras the target temperature appears as a dashed reference line. On cameras without available temperature telemetry the chart stays empty. A **Clear graph** action starts a new graph and **Export temperature CSV** saves the observed time-series (UTC timestamp, elapsed seconds, actual temperature and configured target). The graph keeps up to 18,000 samples in memory and displays the most recent 90 minutes, while exporting all retained samples.
+
+This version adds `matplotlib` to `requirements.txt`. The camera and physical cooling behavior should be verified with attached ZWO hardware.
