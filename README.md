@@ -62,6 +62,8 @@ If Linux cannot access the camera or the panel, check USB permissions and udev r
 | FLAT panel · INDI server | Host, TCP port, optional device, driver, serial port, brightness | The serial-port detector scans the **local** computer only |
 | Actions | Start acquisition, stop after current frame | FITS files are saved incrementally |
 
+![alt text](image-1.png)
+
 ### Configure the camera
 
 1. Connect the ZWO camera to USB.
